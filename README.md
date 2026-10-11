@@ -112,10 +112,24 @@ Without `PAYSIM_TEST_DATABASE_URL`, integration tests are skipped rather than fa
 | `PAYSIM_TOPIC` / `PAYSIM_DLQ_TOPIC` | `payments.events` / `payments.events.dlq` |
 | `PAYSIM_CONSUMER_GROUP` | `paysim-notifications` |
 
+## Load testing
+
+`cmd/loadgen` opens a fresh set of synthetic accounts on a running simulator, then sends concurrent `POST /v1/payments` requests (each with a unique `Idempotency-Key`) and reports throughput, p50/p95/p99/max latency and outcomes (`completed`, `rejected`, `http_<status>`, `transport_error`):
+
+```bash
+docker compose up --build -d
+go run ./cmd/loadgen -accounts 100 -workers 32 -duration 30s
+# contention on popular accounts: 80% of transfers touch one of 2 hot accounts
+go run ./cmd/loadgen -accounts 100 -workers 32 -duration 30s -hot-accounts 2 -hot-ratio 0.8
+```
+
+Run `go run ./cmd/loadgen -h` for every flag (`-requests`, `-max-amount`, `-opening-balance`, `-seed`, …). Latency is measured client-side per request. No results are published yet; see the roadmap.
+
 ## Project layout
 
 ```
 cmd/paysim            wiring: config, HTTP server, relay, consumer, graceful shutdown
+cmd/loadgen           HTTP load generator: concurrent transfers, hot-account skew, latency percentiles
 internal/payment      accounts, transfers, ledger, idempotency, outbox writes
 internal/outbox       relay: claim → publish → mark published
 internal/consumer     at-least-once consumer with dedupe, retries, DLQ

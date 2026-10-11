@@ -9,11 +9,11 @@ Small, independently shippable tasks, roughly in priority order. Each should lan
 - [x] Transactional outbox, relay with `SKIP LOCKED`, franz-go publisher
 - [x] Idempotent consumer with retries and a dead-letter topic
 - [x] Invariant checks after every test; race-detector CI against real Postgres
+- [x] `cmd/loadgen`: concurrent transfers over HTTP with configurable accounts, workers and hot-account skew; reports throughput and p50/p95/p99 latency
 
 ## Next
 
 ### Measure it
-- [ ] `cmd/loadgen`: concurrent transfers over HTTP with configurable accounts, workers and hot-account skew; reports throughput and p50/p95/p99 latency
 - [ ] Publish a results table in the README with the hardware and settings used (measured numbers only)
 - [ ] Prometheus metrics: request latency histogram, payments by status, outbox lag (oldest unpublished event age), consumer retries and DLQ count
 
