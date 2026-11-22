@@ -1,7 +1,9 @@
 # Load test on a GitHub-hosted runner: brings up the docker compose stack
 # (Postgres, Kafka, simulator) and runs cmd/loadgen against it, once with
 # uniformly random transfers and once with hot-account contention.
-# Results and runner hardware are written to the job summary.
+# Results and runner hardware are written to the job summary. Each scenario
+# uses its own seed: loadgen derives Idempotency-Keys from the seed, so two
+# runs with the same seed against one database would collide on keys.
 name: Benchmark
 
 on:
@@ -65,7 +67,7 @@ jobs:
 
       - name: Hot-account contention
         run: |
-          ./loadgen -accounts 100 -workers "$WORKERS" -duration "$DURATION" -hot-accounts 2 -hot-ratio 0.8 -seed 1 | tee hot.txt
+          ./loadgen -accounts 100 -workers "$WORKERS" -duration "$DURATION" -hot-accounts 2 -hot-ratio 0.8 -seed 2 | tee hot.txt
           { echo "## Hot: 80% of transfers touch 1 of 2 accounts"; echo '```'; cat hot.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Service logs
