@@ -123,7 +123,20 @@ go run ./cmd/loadgen -accounts 100 -workers 32 -duration 30s
 go run ./cmd/loadgen -accounts 100 -workers 32 -duration 30s -hot-accounts 2 -hot-ratio 0.8
 ```
 
-Run `go run ./cmd/loadgen -h` for every flag (`-requests`, `-max-amount`, `-opening-balance`, `-seed`, …). Latency is measured client-side per request. No results are published yet; see the roadmap.
+Run `go run ./cmd/loadgen -h` for every flag (`-requests`, `-max-amount`, `-opening-balance`, `-seed`, …). Latency is measured client-side per request.
+
+### Results
+
+Measured by the [Benchmark workflow](.github/workflows/bench.yml) ([run 44987677746](https://github.com/xeeshan16/payment-simulator/actions/runs/44987677746)), which starts the `docker compose` stack on a GitHub-hosted runner and runs both scenarios for 30 s each with 32 workers and 100 fresh accounts:
+
+| Scenario | Requests | Throughput | p50 | p95 | p99 | max | Outcomes |
+| --- | --: | --: | --: | --: | --: | --: | --- |
+| Uniform (`-seed 1`) | 45,154 | 1,505.0 req/s | 18.54 ms | 30.32 ms | 53.68 ms | 140.02 ms | all `completed` |
+| Hot: 80% touch 1 of 2 accounts (`-seed 2`) | 36,352 | 1,211.5 req/s | 23.80 ms | 36.58 ms | 54.90 ms | 526.74 ms | all `completed` |
+
+Hardware: 4 vCPUs (Intel Xeon Platinum 8573C), 15 GiB RAM, Linux 7.0 (Azure), Docker Compose v5.1.3. Postgres, Kafka, the simulator and loadgen all share that one machine, with default Postgres settings. Treat these as a baseline for comparing changes, not as a capacity figure: GitHub-hosted runners vary in CPU model between runs, so compare numbers from the same run or several runs. Contention on two hot accounts cost about 20% of throughput and raised the tail (max 527 ms) in this run, as expected when transfers touching the same account queue on its row lock.
+
+To reproduce, trigger the workflow from the Actions tab (duration and workers are inputs). Use a different `-seed` for each run against the same database: Idempotency-Keys are derived from the seed, so repeating one turns the second run into key-reuse `422`s.
 
 ## Project layout
 
@@ -140,6 +153,6 @@ internal/db           pool + embedded SQL migrations
 
 ## Status and roadmap
 
-This is the first slice: synchronous transfers, the outbox pipeline and one sample consumer. Next up are load testing with published p50/p95/p99 numbers, OpenTelemetry tracing across the outbox hop, refunds and reversals, and reconciliation. See [ROADMAP.md](ROADMAP.md).
+This is the first slice: synchronous transfers, the outbox pipeline and one sample consumer. Load-test results are published above; next up are Prometheus metrics, OpenTelemetry tracing across the outbox hop, refunds and reversals, and reconciliation. See [ROADMAP.md](ROADMAP.md).
 
 Built with Go 1.26, PostgreSQL, [pgx](https://github.com/jackc/pgx) and [franz-go](https://github.com/twmb/franz-go).
