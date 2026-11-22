@@ -1,0 +1,77 @@
+# Load test on a GitHub-hosted runner: brings up the docker compose stack
+# (Postgres, Kafka, simulator) and runs cmd/loadgen against it, once with
+# uniformly random transfers and once with hot-account contention.
+# Results and runner hardware are written to the job summary.
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: Duration of each scenario
+        default: 30s
+      workers:
+        description: Concurrent loadgen workers
+        default: "32"
+
+permissions:
+  contents: read
+
+jobs:
+  loadgen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DURATION: ${{ inputs.duration }}
+      WORKERS: ${{ inputs.workers }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build loadgen
+        run: go build -o loadgen ./cmd/loadgen
+
+      - name: Start stack
+        run: |
+          docker compose up --build -d --wait postgres kafka
+          docker compose up -d paysim
+          for i in $(seq 1 60); do
+            curl -fsS http://localhost:8080/healthz && exit 0
+            sleep 1
+          done
+          docker compose logs paysim
+          exit 1
+
+      - name: Runner hardware
+        run: |
+          {
+            echo "## Runner"
+            echo '```'
+            echo "cpus:   $(nproc)"
+            lscpu | grep -m1 'Model name'
+            free -h | awk '/^Mem:/ {print "memory: " $2}'
+            echo "kernel: $(uname -r)"
+            docker compose version
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Uniform transfers
+        run: |
+          ./loadgen -accounts 100 -workers "$WORKERS" -duration "$DURATION" -seed 1 | tee uniform.txt
+          { echo "## Uniform: 100 accounts"; echo '```'; cat uniform.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hot-account contention
+        run: |
+          ./loadgen -accounts 100 -workers "$WORKERS" -duration "$DURATION" -hot-accounts 2 -hot-ratio 0.8 -seed 1 | tee hot.txt
+          { echo "## Hot: 80% of transfers touch 1 of 2 accounts"; echo '```'; cat hot.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Service logs
+        if: failure()
+        run: docker compose logs --tail 200
+
+      - name: Stop stack
+        if: always()
+        run: docker compose down -v
