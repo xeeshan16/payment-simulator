@@ -111,6 +111,7 @@ Without `PAYSIM_TEST_DATABASE_URL`, integration tests are skipped rather than fa
 | `PAYSIM_HTTP_ADDR` | `:8080` |
 | `PAYSIM_TOPIC` / `PAYSIM_DLQ_TOPIC` | `payments.events` / `payments.events.dlq` |
 | `PAYSIM_CONSUMER_GROUP` | `paysim-notifications` |
+| `PAYSIM_OUTBOX_RETENTION` | `168h`: published outbox rows older than this are pruned in batches; `0` keeps them forever |
 
 ## Load testing
 
@@ -141,10 +142,10 @@ To reproduce, trigger the workflow from the Actions tab (duration and workers ar
 ## Project layout
 
 ```
-cmd/paysim            wiring: config, HTTP server, relay, consumer, graceful shutdown
+cmd/paysim            wiring: config, HTTP server, relay, pruner, consumer, graceful shutdown
 cmd/loadgen           HTTP load generator: concurrent transfers, hot-account skew, latency percentiles
 internal/payment      accounts, transfers, ledger, idempotency, outbox writes
-internal/outbox       relay: claim → publish → mark published
+internal/outbox       relay: claim → publish → mark published; pruner for published rows
 internal/consumer     at-least-once consumer with dedupe, retries, DLQ
 internal/kafka        franz-go publisher
 internal/httpapi      JSON/HTTP handlers and error mapping

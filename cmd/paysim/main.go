@@ -32,6 +32,9 @@ type config struct {
 	topic       string
 	dlqTopic    string
 	group       string
+	// outboxRetention is how long published outbox rows are kept; 0 keeps
+	// them forever.
+	outboxRetention time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -43,6 +46,11 @@ func loadConfig() (config, error) {
 		group:       env("PAYSIM_CONSUMER_GROUP", "paysim-notifications"),
 	}
 	c.dlqTopic = env("PAYSIM_DLQ_TOPIC", c.topic+".dlq")
+	retention, err := time.ParseDuration(env("PAYSIM_OUTBOX_RETENTION", "168h"))
+	if err != nil || retention < 0 {
+		return c, fmt.Errorf("PAYSIM_OUTBOX_RETENTION must be a non-negative duration such as 168h, got %q", os.Getenv("PAYSIM_OUTBOX_RETENTION"))
+	}
+	c.outboxRetention = retention
 	if c.databaseURL == "" {
 		return c, errors.New("PAYSIM_DATABASE_URL is required")
 	}
@@ -117,7 +125,7 @@ func run(log *slog.Logger) error {
 	}
 
 	var wg sync.WaitGroup
-	errs := make(chan error, 3)
+	errs := make(chan error, 4)
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
@@ -128,6 +136,13 @@ func run(log *slog.Logger) error {
 	}()
 	go func() { defer wg.Done(); errs <- relay.Run(ctx) }()
 	go func() { defer wg.Done(); errs <- notifications.Run(ctx) }()
+	if cfg.outboxRetention > 0 {
+		pruner := outbox.NewPruner(pool, cfg.outboxRetention, 1000, time.Minute, log)
+		wg.Add(1)
+		go func() { defer wg.Done(); errs <- pruner.Run(ctx) }()
+	} else {
+		log.Info("outbox pruning disabled")
+	}
 
 	select {
 	case <-ctx.Done():

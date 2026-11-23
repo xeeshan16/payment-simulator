@@ -11,6 +11,7 @@ Small, independently shippable tasks, roughly in priority order. Each should lan
 - [x] Invariant checks after every test; race-detector CI against real Postgres
 - [x] `cmd/loadgen`: concurrent transfers over HTTP with configurable accounts, workers and hot-account skew; reports throughput and p50/p95/p99 latency
 - [x] Results table in the README from a manually triggered benchmark workflow, with runner hardware and settings
+- [x] Prune published outbox rows older than a retention window
 
 ## Next
 
@@ -19,7 +20,6 @@ Small, independently shippable tasks, roughly in priority order. Each should lan
 
 ### Operability
 - [ ] OpenTelemetry tracing, with trace context propagated through the outbox into Kafka headers and continued in the consumer
-- [ ] Prune published outbox rows older than a retention window
 - [ ] Expire idempotency keys after 24 hours
 - [ ] Statement timeout on idempotency-key waits; return `409 Conflict` instead of waiting indefinitely
 - [ ] Consumer: pause the partition on infrastructure errors, dead-letter only poison messages
