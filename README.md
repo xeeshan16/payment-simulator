@@ -13,7 +13,7 @@ All data is synthetic. Nothing here comes from, or connects to, a real payment s
 | A client retries after a timeout | `Idempotency-Key` is claimed in the same transaction as the transfer; a retry gets the original response (`200`, `Idempotent-Replayed: true`) | `TestRetryWithSameKeyReplaysOriginalResponse` |
 | 40 identical requests arrive at once | The key's primary key makes concurrent claims queue behind the first; exactly one payment is created | `TestConcurrentRequestsWithSameKeyCreateOnePayment` |
 | Same key, different request | Request is hashed and compared; mismatch returns `422 idempotency_key_reused` | `TestReusingKeyForDifferentRequestFails` |
-| A key reused a day later | Keys expire after 24 hours; the claim takes over an expired key, so the request is processed as new | `TestExpiredKeyIsProcessedAsNewRequest` |
+| A key reused a day later | Keys expire after 24 hours; the claim takes over an expired key, so the request is processed as new. A pruner deletes expired keys in batches | `TestExpiredKeyIsProcessedAsNewRequest`, `TestKeyPrunerDeletesOnlyExpiredKeys` |
 | Opposite transfers between the same accounts | Rows are locked in a fixed order (by id), so lock cycles can't form | `TestConcurrentTransfersPreserveInvariants` |
 | Overdraft / lost update under contention | `SELECT … FOR UPDATE` plus a `CHECK` constraint; insufficient funds is a recorded *rejection*, not an error | same test, plus ledger invariants |
 | Money created or destroyed by a bug | Every movement is a balanced double-entry journal; opening balances are funded from a per-currency system account so the whole ledger sums to zero | `checkInvariants` runs after every test |
@@ -143,9 +143,9 @@ To reproduce, trigger the workflow from the Actions tab (duration and workers ar
 ## Project layout
 
 ```
-cmd/paysim            wiring: config, HTTP server, relay, pruner, consumer, graceful shutdown
+cmd/paysim            wiring: config, HTTP server, relay, pruners, consumer, graceful shutdown
 cmd/loadgen           HTTP load generator: concurrent transfers, hot-account skew, latency percentiles
-internal/payment      accounts, transfers, ledger, idempotency, outbox writes
+internal/payment      accounts, transfers, ledger, idempotency and key expiry, outbox writes
 internal/outbox       relay: claim → publish → mark published; pruner for published rows
 internal/consumer     at-least-once consumer with dedupe, retries, DLQ
 internal/kafka        franz-go publisher

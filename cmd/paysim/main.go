@@ -117,6 +117,7 @@ func run(log *slog.Logger) error {
 		Name:     "notifications",
 		DLQTopic: cfg.dlqTopic,
 	}, log)
+	keyPruner := payment.NewKeyPruner(pool, 1000, time.Minute, log)
 
 	srv := &http.Server{
 		Addr:              cfg.httpAddr,
@@ -125,8 +126,8 @@ func run(log *slog.Logger) error {
 	}
 
 	var wg sync.WaitGroup
-	errs := make(chan error, 4)
-	wg.Add(3)
+	errs := make(chan error, 5)
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
 		log.Info("http listening", "addr", cfg.httpAddr)
@@ -136,6 +137,7 @@ func run(log *slog.Logger) error {
 	}()
 	go func() { defer wg.Done(); errs <- relay.Run(ctx) }()
 	go func() { defer wg.Done(); errs <- notifications.Run(ctx) }()
+	go func() { defer wg.Done(); errs <- keyPruner.Run(ctx) }()
 	if cfg.outboxRetention > 0 {
 		pruner := outbox.NewPruner(pool, cfg.outboxRetention, 1000, time.Minute, log)
 		wg.Add(1)

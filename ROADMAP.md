@@ -12,6 +12,7 @@ Small, independently shippable tasks, roughly in priority order. Each should lan
 - [x] `cmd/loadgen`: concurrent transfers over HTTP with configurable accounts, workers and hot-account skew; reports throughput and p50/p95/p99 latency
 - [x] Results table in the README from a manually triggered benchmark workflow, with runner hardware and settings
 - [x] Prune published outbox rows older than a retention window
+- [x] Expire idempotency keys after 24 hours, and prune expired keys
 
 ## Next
 
@@ -20,7 +21,6 @@ Small, independently shippable tasks, roughly in priority order. Each should lan
 
 ### Operability
 - [ ] OpenTelemetry tracing, with trace context propagated through the outbox into Kafka headers and continued in the consumer
-- [ ] Expire idempotency keys after 24 hours
 - [ ] Statement timeout on idempotency-key waits; return `409 Conflict` instead of waiting indefinitely
 - [ ] Consumer: pause the partition on infrastructure errors, dead-letter only poison messages
 - [ ] DLQ replay tool: re-publish selected dead-lettered records to the main topic
