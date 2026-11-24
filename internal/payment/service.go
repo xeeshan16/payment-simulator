@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,6 +17,11 @@ import (
 
 // MaxIdempotencyKeyLen bounds the Idempotency-Key header.
 const MaxIdempotencyKeyLen = 255
+
+// IdempotencyKeyTTL is how long a key stays bound to its first request. A
+// retry within the window replays the stored response; once the window has
+// passed the key is expired and a request using it is processed as new.
+const IdempotencyKeyTTL = 24 * time.Hour
 
 // Service implements the payment use cases on top of Postgres.
 type Service struct {
@@ -73,6 +79,11 @@ func (s *Service) OpenAccount(ctx context.Context, req OpenAccountRequest) (Acco
 // second request sees the stored response and returns it (replayed=true); if
 // it rolled back, the second request claims the key and does the work itself.
 // Either way exactly one payment exists per key.
+//
+// A key older than IdempotencyKeyTTL is expired: the insert's ON CONFLICT
+// clause takes it over for the new request, under the same row lock, so
+// concurrent requests still resolve to one payment. The payment made under
+// the expired key is untouched.
 func (s *Service) CreatePayment(ctx context.Context, key string, req CreatePaymentRequest) (p Payment, replayed bool, err error) {
 	if key == "" || len(key) > MaxIdempotencyKeyLen {
 		return Payment{}, false, invalid("Idempotency-Key header is required (1-%d characters)", MaxIdempotencyKeyLen)
@@ -84,8 +95,11 @@ func (s *Service) CreatePayment(ctx context.Context, key string, req CreatePayme
 
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
-			`INSERT INTO idempotency_keys (key, request_hash) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING`,
-			key, hash)
+			`INSERT INTO idempotency_keys (key, request_hash) VALUES ($1, $2)
+			 ON CONFLICT (key) DO UPDATE
+			 SET request_hash = EXCLUDED.request_hash, payment_id = NULL, response_body = NULL, created_at = now()
+			 WHERE idempotency_keys.created_at < now() - make_interval(secs => $3)`,
+			key, hash, IdempotencyKeyTTL.Seconds())
 		if err != nil {
 			return fmt.Errorf("claim idempotency key: %w", err)
 		}

@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -206,6 +207,75 @@ func TestReusingKeyForDifferentRequestFails(t *testing.T) {
 	}
 }
 
+// Once a key is older than the TTL it no longer replays: the same request is
+// processed as a new payment, and a different request may use the key too.
+// The payment made under the expired key stays as it was.
+func TestExpiredKeyIsProcessedAsNewRequest(t *testing.T) {
+	t.Parallel()
+	svc, pool := setup(t)
+	ctx := context.Background()
+	alice := open(t, svc, "alice", "AED", 1_000)
+	bob := open(t, svc, "bob", "AED", 0)
+	req := payment.CreatePaymentRequest{FromAccount: alice.ID, ToAccount: bob.ID, Amount: 100, Currency: "AED"}
+
+	first, _, err := svc.CreatePayment(ctx, "old-key", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ageKey(t, pool, "old-key", payment.IdempotencyKeyTTL-time.Minute)
+	if _, replayed, err := svc.CreatePayment(ctx, "old-key", req); err != nil || !replayed {
+		t.Fatalf("key inside the TTL: replayed=%v err=%v, want a replay", replayed, err)
+	}
+
+	ageKey(t, pool, "old-key", payment.IdempotencyKeyTTL+time.Minute)
+	second, replayed, err := svc.CreatePayment(ctx, "old-key", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed || second.ID == first.ID {
+		t.Fatalf("expired key replayed: replayed=%v first=%s second=%s", replayed, first.ID, second.ID)
+	}
+	if got := balance(t, svc, alice.ID); got != 800 {
+		t.Errorf("alice balance %d, want 800", got)
+	}
+	if stored, err := svc.GetPayment(ctx, first.ID); err != nil || stored.Status != payment.StatusCompleted {
+		t.Errorf("original payment after expiry: %+v, %v", stored, err)
+	}
+
+	// The key is now bound to the new request, with a fresh TTL.
+	if _, replayed, err := svc.CreatePayment(ctx, "old-key", req); err != nil || !replayed {
+		t.Fatalf("retry of the new request: replayed=%v err=%v, want a replay", replayed, err)
+	}
+	ageKey(t, pool, "old-key", payment.IdempotencyKeyTTL+time.Minute)
+	third, replayed, err := svc.CreatePayment(ctx, "old-key", payment.CreatePaymentRequest{
+		FromAccount: alice.ID, ToAccount: bob.ID, Amount: 999, Currency: "AED",
+	})
+	if err != nil {
+		t.Fatalf("different request on an expired key: %v", err)
+	}
+	if replayed || third.Status != payment.StatusRejected {
+		t.Fatalf("different request on an expired key: replayed=%v payment=%+v", replayed, third)
+	}
+	checkInvariants(t, pool)
+}
+
+// ageKey moves a key and the payment it is bound to into the past, as if
+// age had elapsed since the request was made.
+func ageKey(t *testing.T, pool *pgxpool.Pool, key string, age time.Duration) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx,
+		`UPDATE payments SET created_at = now() - make_interval(secs => $2)
+		 WHERE id = (SELECT payment_id FROM idempotency_keys WHERE key = $1)`, key, age.Seconds()); err != nil {
+		t.Fatalf("age payment: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE idempotency_keys SET created_at = now() - make_interval(secs => $2) WHERE key = $1`,
+		key, age.Seconds()); err != nil {
+		t.Fatalf("age key: %v", err)
+	}
+}
+
 // Many clients retrying the same request at the same moment must produce one
 // payment and identical responses.
 func TestConcurrentRequestsWithSameKeyCreateOnePayment(t *testing.T) {
@@ -331,8 +401,13 @@ func checkInvariants(t *testing.T, pool *pgxpool.Pool) {
 		{"payments without exactly one outbox event",
 			`SELECT count(*) FROM payments p
 			 WHERE (SELECT count(*) FROM outbox_events o WHERE o.msg_key = p.id::text) <> 1`},
-		{"payments not bound to an idempotency key",
-			`SELECT count(*) FROM payments p WHERE NOT EXISTS (SELECT 1 FROM idempotency_keys k WHERE k.payment_id = p.id)`},
+		// Keys expire, so only payments made within the key TTL must still
+		// be bound to one.
+		{"unexpired payments not bound to an idempotency key",
+			fmt.Sprintf(`SELECT count(*) FROM payments p
+			 WHERE p.created_at >= now() - make_interval(secs => %d)
+			 AND NOT EXISTS (SELECT 1 FROM idempotency_keys k WHERE k.payment_id = p.id)`,
+				int(payment.IdempotencyKeyTTL.Seconds()))},
 	}
 	for _, q := range queries {
 		var n int
