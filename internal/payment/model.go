@@ -83,6 +83,9 @@ var (
 	ErrNotFound             = errors.New("not found")
 	ErrCurrencyMismatch     = errors.New("currency does not match account currency")
 	ErrIdempotencyKeyReused = errors.New("idempotency key was already used with a different request")
+	// ErrIdempotencyKeyInProgress means another request holding the same key
+	// did not finish within the key wait timeout. Nothing was written.
+	ErrIdempotencyKeyInProgress = errors.New("a request with this idempotency key is still in progress")
 )
 
 // ValidationError is returned for requests that are malformed before any

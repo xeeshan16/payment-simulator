@@ -323,6 +323,93 @@ func TestConcurrentRequestsWithSameKeyCreateOnePayment(t *testing.T) {
 	checkInvariants(t, pool)
 }
 
+// A request whose key is held by a transaction that does not finish within
+// the key wait timeout gives up instead of waiting indefinitely, writes
+// nothing, and leaves the key free for a retry once the holder rolls back.
+func TestKeyHeldTooLongReturnsInProgress(t *testing.T) {
+	t.Parallel()
+	svc, pool := setup(t)
+	svc.SetKeyWaitTimeout(100 * time.Millisecond)
+	ctx := context.Background()
+	alice := open(t, svc, "alice", "AED", 1_000)
+	bob := open(t, svc, "bob", "AED", 0)
+	req := payment.CreatePaymentRequest{FromAccount: alice.ID, ToAccount: bob.ID, Amount: 100, Currency: "AED"}
+
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Rollback(ctx) //nolint:errcheck // already rolled back on the happy path
+	if _, err := holder.Exec(ctx,
+		`INSERT INTO idempotency_keys (key, request_hash) VALUES ('busy-key', 'in-flight')`); err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Now()
+	_, _, err = svc.CreatePayment(ctx, "busy-key", req)
+	if !errors.Is(err, payment.ErrIdempotencyKeyInProgress) {
+		t.Fatalf("want ErrIdempotencyKeyInProgress, got %v", err)
+	}
+	if waited := time.Since(started); waited > 5*time.Second {
+		t.Fatalf("gave up after %v, want about the 100ms key wait timeout", waited)
+	}
+
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p, replayed, err := svc.CreatePayment(ctx, "busy-key", req)
+	if err != nil || replayed || p.Status != payment.StatusCompleted {
+		t.Fatalf("retry after the holder rolled back: payment=%+v replayed=%v err=%v", p, replayed, err)
+	}
+	if got := balance(t, svc, alice.ID); got != 900 {
+		t.Errorf("alice balance %d, want 900", got)
+	}
+	checkInvariants(t, pool)
+}
+
+// The key wait timeout bounds only the key claim. A busy account is not a
+// duplicate request, so a payment waits for its row lock however long that
+// takes.
+func TestKeyWaitTimeoutDoesNotApplyToAccountLocks(t *testing.T) {
+	t.Parallel()
+	svc, pool := setup(t)
+	const keyWait = 50 * time.Millisecond
+	const held = 500 * time.Millisecond
+	svc.SetKeyWaitTimeout(keyWait)
+	ctx := context.Background()
+	alice := open(t, svc, "alice", "AED", 1_000)
+	bob := open(t, svc, "bob", "AED", 0)
+
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec(ctx, `SELECT 1 FROM accounts WHERE id = $1 FOR UPDATE`, alice.ID); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan error, 1)
+	go func() {
+		time.Sleep(held)
+		released <- holder.Rollback(ctx)
+	}()
+
+	started := time.Now()
+	p, _, err := svc.CreatePayment(ctx, "account-busy", payment.CreatePaymentRequest{
+		FromAccount: alice.ID, ToAccount: bob.ID, Amount: 100, Currency: "AED",
+	})
+	waited := time.Since(started)
+	if rerr := <-released; rerr != nil {
+		t.Fatal(rerr)
+	}
+	if err != nil || p.Status != payment.StatusCompleted {
+		t.Fatalf("payment behind a locked account: payment=%+v err=%v", p, err)
+	}
+	if waited < held/2 {
+		t.Fatalf("payment finished after %v, before the account lock was released", waited)
+	}
+	checkInvariants(t, pool)
+}
+
 // Random transfers in both directions across a small set of accounts, from
 // many goroutines at once. Opposite transfers between the same pair would
 // deadlock without consistent lock ordering; overdrafts or lost updates

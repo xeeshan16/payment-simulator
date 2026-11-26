@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xeeshan16/payment-simulator/internal/id"
@@ -23,15 +24,31 @@ const MaxIdempotencyKeyLen = 255
 // passed the key is expired and a request using it is processed as new.
 const IdempotencyKeyTTL = 24 * time.Hour
 
+// DefaultKeyWaitTimeout bounds how long a request waits for a concurrent
+// request holding the same idempotency key before giving up with
+// ErrIdempotencyKeyInProgress.
+const DefaultKeyWaitTimeout = 5 * time.Second
+
+// lockNotAvailable is the SQLSTATE Postgres reports when lock_timeout expires.
+const lockNotAvailable = "55P03"
+
 // Service implements the payment use cases on top of Postgres.
 type Service struct {
-	pool  *pgxpool.Pool
-	topic string
+	pool    *pgxpool.Pool
+	topic   string
+	keyWait time.Duration
 }
 
 // NewService returns a Service that writes outbox events for topic.
 func NewService(pool *pgxpool.Pool, topic string) *Service {
-	return &Service{pool: pool, topic: topic}
+	return &Service{pool: pool, topic: topic, keyWait: DefaultKeyWaitTimeout}
+}
+
+// SetKeyWaitTimeout changes how long CreatePayment waits for a concurrent
+// request holding the same idempotency key. Zero waits indefinitely. It must
+// be called before the service handles requests.
+func (s *Service) SetKeyWaitTimeout(d time.Duration) {
+	s.keyWait = d
 }
 
 // OpenAccount creates a customer account. A non-zero opening balance is
@@ -84,6 +101,11 @@ func (s *Service) OpenAccount(ctx context.Context, req OpenAccountRequest) (Acco
 // clause takes it over for the new request, under the same row lock, so
 // concurrent requests still resolve to one payment. The payment made under
 // the expired key is untouched.
+//
+// The wait on a concurrent request is bounded by a lock_timeout scoped to the
+// claim statement. If it expires, CreatePayment returns
+// ErrIdempotencyKeyInProgress and nothing is written, so the client can retry
+// later with the same key. Account row locks taken afterwards are not affected.
 func (s *Service) CreatePayment(ctx context.Context, key string, req CreatePaymentRequest) (p Payment, replayed bool, err error) {
 	if key == "" || len(key) > MaxIdempotencyKeyLen {
 		return Payment{}, false, invalid("Idempotency-Key header is required (1-%d characters)", MaxIdempotencyKeyLen)
@@ -94,6 +116,13 @@ func (s *Service) CreatePayment(ctx context.Context, key string, req CreatePayme
 	hash := requestHash(req)
 
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if s.keyWait > 0 {
+			if _, err := tx.Exec(ctx,
+				`SELECT set_config('lock_timeout', $1, true)`, lockTimeout(s.keyWait),
+			); err != nil {
+				return fmt.Errorf("set key wait timeout: %w", err)
+			}
+		}
 		tag, err := tx.Exec(ctx,
 			`INSERT INTO idempotency_keys (key, request_hash) VALUES ($1, $2)
 			 ON CONFLICT (key) DO UPDATE
@@ -101,12 +130,23 @@ func (s *Service) CreatePayment(ctx context.Context, key string, req CreatePayme
 			 WHERE idempotency_keys.created_at < now() - make_interval(secs => $3)`,
 			key, hash, IdempotencyKeyTTL.Seconds())
 		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == lockNotAvailable {
+				return ErrIdempotencyKeyInProgress
+			}
 			return fmt.Errorf("claim idempotency key: %w", err)
 		}
 		if tag.RowsAffected() == 0 {
 			p, err = loadReplay(ctx, tx, key, hash)
 			replayed = err == nil
 			return err
+		}
+		if s.keyWait > 0 {
+			// Only the key claim is bounded: a busy account is not a
+			// duplicate request, so its row locks are waited for as before.
+			if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout TO DEFAULT`); err != nil {
+				return fmt.Errorf("reset lock timeout: %w", err)
+			}
 		}
 
 		p, err = s.transfer(ctx, tx, req)
@@ -126,6 +166,16 @@ func (s *Service) CreatePayment(ctx context.Context, key string, req CreatePayme
 		return Payment{}, false, err
 	}
 	return p, replayed, nil
+}
+
+// lockTimeout formats d as a lock_timeout value, rounding sub-millisecond
+// durations up so a positive timeout never becomes 0 (wait forever).
+func lockTimeout(d time.Duration) string {
+	ms := d.Milliseconds()
+	if ms < 1 {
+		ms = 1
+	}
+	return fmt.Sprintf("%dms", ms)
 }
 
 func loadReplay(ctx context.Context, tx pgx.Tx, key, hash string) (Payment, error) {

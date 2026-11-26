@@ -2,10 +2,12 @@ package httpapi_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/xeeshan16/payment-simulator/internal/httpapi"
 	"github.com/xeeshan16/payment-simulator/internal/payment"
@@ -130,5 +132,36 @@ func TestErrorResponses(t *testing.T) {
 				t.Errorf("got %d %q, want %d %q", resp.StatusCode, e.Code, tc.status, tc.code)
 			}
 		})
+	}
+}
+
+// A request whose idempotency key is held by an unfinished request gets 409
+// once the key wait timeout passes, rather than hanging.
+func TestKeyInProgressReturnsConflict(t *testing.T) {
+	t.Parallel()
+	pool := testutil.NewDB(t)
+	svc := payment.NewService(pool, "payments.events")
+	svc.SetKeyWaitTimeout(100 * time.Millisecond)
+	srv := httptest.NewServer(httpapi.New(svc, testutil.Logger(t)))
+	t.Cleanup(srv.Close)
+	c := &client{t: t, srv: srv}
+	alice, bob := c.account("alice", 100), c.account("bob", 0)
+
+	ctx := context.Background()
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Rollback(ctx) //nolint:errcheck // only cleanup
+	if _, err := holder.Exec(ctx,
+		`INSERT INTO idempotency_keys (key, request_hash) VALUES ('busy', 'in-flight')`); err != nil {
+		t.Fatal(err)
+	}
+
+	var e struct{ Code string }
+	resp := c.do("POST", "/v1/payments", "busy",
+		map[string]any{"from_account": alice.ID, "to_account": bob.ID, "amount": 10, "currency": "AED"}, &e)
+	if resp.StatusCode != http.StatusConflict || e.Code != "idempotency_key_in_progress" {
+		t.Fatalf("got %d %q, want 409 %q", resp.StatusCode, e.Code, "idempotency_key_in_progress")
 	}
 }

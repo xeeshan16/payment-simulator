@@ -13,6 +13,7 @@ Small, independently shippable tasks, roughly in priority order. Each should lan
 - [x] Results table in the README from a manually triggered benchmark workflow, with runner hardware and settings
 - [x] Prune published outbox rows older than a retention window
 - [x] Expire idempotency keys after 24 hours, and prune expired keys
+- [x] Bound the wait on an in-flight idempotency key with a lock timeout; return `409 Conflict` instead of waiting indefinitely
 
 ## Next
 
@@ -21,7 +22,6 @@ Small, independently shippable tasks, roughly in priority order. Each should lan
 
 ### Operability
 - [ ] OpenTelemetry tracing, with trace context propagated through the outbox into Kafka headers and continued in the consumer
-- [ ] Statement timeout on idempotency-key waits; return `409 Conflict` instead of waiting indefinitely
 - [ ] Consumer: pause the partition on infrastructure errors, dead-letter only poison messages
 - [ ] DLQ replay tool: re-publish selected dead-lettered records to the main topic
 

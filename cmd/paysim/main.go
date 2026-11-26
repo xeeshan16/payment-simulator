@@ -35,6 +35,9 @@ type config struct {
 	// outboxRetention is how long published outbox rows are kept; 0 keeps
 	// them forever.
 	outboxRetention time.Duration
+	// keyWait bounds how long a payment request waits for a concurrent
+	// request with the same idempotency key; 0 waits indefinitely.
+	keyWait time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -51,6 +54,11 @@ func loadConfig() (config, error) {
 		return c, fmt.Errorf("PAYSIM_OUTBOX_RETENTION must be a non-negative duration such as 168h, got %q", os.Getenv("PAYSIM_OUTBOX_RETENTION"))
 	}
 	c.outboxRetention = retention
+	keyWait, err := time.ParseDuration(env("PAYSIM_IDEMPOTENCY_KEY_WAIT", payment.DefaultKeyWaitTimeout.String()))
+	if err != nil || keyWait < 0 {
+		return c, fmt.Errorf("PAYSIM_IDEMPOTENCY_KEY_WAIT must be a non-negative duration such as 5s, got %q", os.Getenv("PAYSIM_IDEMPOTENCY_KEY_WAIT"))
+	}
+	c.keyWait = keyWait
 	if c.databaseURL == "" {
 		return c, errors.New("PAYSIM_DATABASE_URL is required")
 	}
@@ -112,6 +120,7 @@ func run(log *slog.Logger) error {
 	defer consumerClient.Close()
 
 	svc := payment.NewService(pool, cfg.topic)
+	svc.SetKeyWaitTimeout(cfg.keyWait)
 	relay := outbox.NewRelay(pool, kafka.Publisher{Client: producer}, 100, 200*time.Millisecond, log)
 	notifications := consumer.New(consumerClient, pool, consumer.Notifications, consumer.Config{
 		Name:     "notifications",

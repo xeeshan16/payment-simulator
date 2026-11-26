@@ -12,6 +12,7 @@ All data is synthetic. Nothing here comes from, or connects to, a real payment s
 | --- | --- | --- |
 | A client retries after a timeout | `Idempotency-Key` is claimed in the same transaction as the transfer; a retry gets the original response (`200`, `Idempotent-Replayed: true`) | `TestRetryWithSameKeyReplaysOriginalResponse` |
 | 40 identical requests arrive at once | The key's primary key makes concurrent claims queue behind the first; exactly one payment is created | `TestConcurrentRequestsWithSameKeyCreateOnePayment` |
+| A retry arrives while the first request is still running | The retry waits on the key, but only up to `PAYSIM_IDEMPOTENCY_KEY_WAIT` (5s); then it gets `409 idempotency_key_in_progress` and nothing is written. Account row locks are not bounded | `TestKeyHeldTooLongReturnsInProgress`, `TestKeyWaitTimeoutDoesNotApplyToAccountLocks` |
 | Same key, different request | Request is hashed and compared; mismatch returns `422 idempotency_key_reused` | `TestReusingKeyForDifferentRequestFails` |
 | A key reused a day later | Keys expire after 24 hours; the claim takes over an expired key, so the request is processed as new. A pruner deletes expired keys in batches | `TestExpiredKeyIsProcessedAsNewRequest`, `TestKeyPrunerDeletesOnlyExpiredKeys` |
 | Opposite transfers between the same accounts | Rows are locked in a fixed order (by id), so lock cycles can't form | `TestConcurrentTransfersPreserveInvariants` |
@@ -56,9 +57,9 @@ sequenceDiagram
     S->>DB: BEGIN
     S->>DB: INSERT idempotency_keys(k, hash) ON CONFLICT DO UPDATE only if expired (> 24h)
     alt key already used
-        DB-->>S: 0 rows (waits for the first request to commit)
+        DB-->>S: 0 rows (waits up to 5s for the first request to finish)
         S->>DB: SELECT stored hash and response
-        S-->>C: 200 original response, or 422 if hash differs
+        S-->>C: 200 original response, 422 if hash differs, or 409 if the wait timed out
     else new or expired key
         S->>DB: SELECT … FOR UPDATE both accounts, ordered by id
         S->>DB: UPDATE balances, INSERT 2 ledger entries (or record rejection)
@@ -86,7 +87,7 @@ curl -s -XPOST localhost:8080/v1/payments \
   -d '{"from_account":"<alice>","to_account":"<bob>","amount":2500,"currency":"AED","reference":"invoice 1001"}'
 ```
 
-Errors use one shape: `{"code":"idempotency_key_reused","message":"…"}` with `400` (invalid request), `404`, or `422` (currency mismatch, key reuse).
+Errors use one shape: `{"code":"idempotency_key_reused","message":"…"}` with `400` (invalid request), `404`, `409` (a request with the same key is still in progress; retry later), or `422` (currency mismatch, key reuse).
 
 ## Running it
 
@@ -112,6 +113,7 @@ Without `PAYSIM_TEST_DATABASE_URL`, integration tests are skipped rather than fa
 | `PAYSIM_HTTP_ADDR` | `:8080` |
 | `PAYSIM_TOPIC` / `PAYSIM_DLQ_TOPIC` | `payments.events` / `payments.events.dlq` |
 | `PAYSIM_CONSUMER_GROUP` | `paysim-notifications` |
+| `PAYSIM_IDEMPOTENCY_KEY_WAIT` | `5s`: how long a payment request waits for a concurrent request with the same key before returning `409`; `0` waits indefinitely |
 | `PAYSIM_OUTBOX_RETENTION` | `168h`: published outbox rows older than this are pruned in batches; `0` keeps them forever |
 
 ## Load testing

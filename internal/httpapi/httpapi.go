@@ -112,6 +112,8 @@ func (h *handler) fail(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusUnprocessableEntity, apiError{"currency_mismatch", err.Error()})
 	case errors.Is(err, payment.ErrIdempotencyKeyReused):
 		writeJSON(w, http.StatusUnprocessableEntity, apiError{"idempotency_key_reused", err.Error()})
+	case errors.Is(err, payment.ErrIdempotencyKeyInProgress):
+		writeJSON(w, http.StatusConflict, apiError{"idempotency_key_in_progress", err.Error()})
 	default:
 		h.log.Error("request failed", "err", err)
 		writeJSON(w, http.StatusInternalServerError, apiError{"internal", "internal error"})
