@@ -22,6 +22,7 @@ All data is synthetic. Nothing here comes from, or connects to, a real payment s
 | Several relay instances | Rows are claimed with `FOR UPDATE SKIP LOCKED`; each event is published once | `TestConcurrentRelaysPublishEachEventOnce` |
 | Kafka redelivers a message | Consumer records `event_id` in the same transaction as its side effect; duplicates are no-ops | `TestDuplicateDeliveryIsAppliedOnce` |
 | Poison or permanently failing message | Bounded retries with backoff, then the record goes to `payments.events.dlq` with diagnostic headers, and the partition keeps moving | `TestRetriesAndDeadLetters` |
+| Database or downstream service down while consuming | Connection-level Postgres errors, and handler errors wrapping `consumer.ErrUnavailable`, are not the record's fault: after the retries, only that partition is paused and its record retried with backoff (up to 30s apart), in order, while other partitions keep flowing. Nothing healthy is dead-lettered | `TestInfrastructureErrorPausesOnlyThatPartition` |
 
 Two of these tests were checked against deliberately broken code: removing the lock ordering makes the concurrency test fail with Postgres deadlocks (`40P01`), and removing the row locks makes it fail on the ledger invariants.
 
@@ -43,7 +44,7 @@ flowchart LR
     R -->|produce, acks=all| T[[Kafka: payments.events]]
     T --> N[Notifications consumer]
     N -->|event_id dedupe + side effect,<br/>one transaction| DB[(processed_events<br/>notifications)]
-    N -->|after N attempts| D[[payments.events.dlq]]
+    N -->|poison record, after N attempts| D[[payments.events.dlq]]
 ```
 
 ### Request flow
@@ -149,7 +150,7 @@ cmd/paysim            wiring: config, HTTP server, relay, pruners, consumer, gra
 cmd/loadgen           HTTP load generator: concurrent transfers, hot-account skew, latency percentiles
 internal/payment      accounts, transfers, ledger, idempotency and key expiry, outbox writes
 internal/outbox       relay: claim → publish → mark published; pruner for published rows
-internal/consumer     at-least-once consumer with dedupe, retries, DLQ
+internal/consumer     at-least-once consumer with dedupe, retries, partition pause, DLQ
 internal/kafka        franz-go publisher
 internal/httpapi      JSON/HTTP handlers and error mapping
 internal/db           pool + embedded SQL migrations
