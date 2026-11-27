@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,12 +34,20 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	cluster, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(1, topic, dlq))
+	return newHarnessWithPartitions(t, 1)
+}
+
+func newHarnessWithPartitions(t *testing.T, partitions int32) *harness {
+	t.Helper()
+	cluster, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(partitions, topic, dlq))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(cluster.Close)
-	prod, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...))
+	prod, err := kgo.NewClient(
+		kgo.SeedBrokers(cluster.ListenAddrs()...),
+		kgo.RecordPartitioner(kgo.ManualPartitioner()),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,8 +57,14 @@ func newHarness(t *testing.T) *harness {
 
 func (h *harness) produce(values ...[]byte) {
 	h.t.Helper()
+	h.produceTo(0, values...)
+}
+
+func (h *harness) produceTo(partition int32, values ...[]byte) {
+	h.t.Helper()
 	for _, v := range values {
-		if err := h.prod.ProduceSync(context.Background(), &kgo.Record{Topic: topic, Value: v}).FirstErr(); err != nil {
+		rec := &kgo.Record{Topic: topic, Partition: partition, Value: v}
+		if err := h.prod.ProduceSync(context.Background(), rec).FirstErr(); err != nil {
 			h.t.Fatal(err)
 		}
 	}
@@ -199,6 +214,61 @@ func TestRetriesAndDeadLetters(t *testing.T) {
 		if header(r, "dlq-error") == "" || header(r, "dlq-original-topic") != topic {
 			t.Errorf("dead-letter record missing diagnostic headers: %+v", r.Headers)
 		}
+	}
+}
+
+// An infrastructure error (here a handler dependency that is down) pauses
+// only the affected partition: the record is neither dead-lettered nor
+// skipped, the records behind it wait their turn, and other partitions keep
+// flowing. The stuck event recovers only once an event on the other partition
+// has been processed, so a consumer that blocked every partition would never
+// get there.
+func TestInfrastructureErrorPausesOnlyThatPartition(t *testing.T) {
+	t.Parallel()
+	h := newHarnessWithPartitions(t, 2)
+	stuck, stuckJSON := event(t, payment.EventPaymentCompleted)
+	behind, behindJSON := event(t, payment.EventPaymentCompleted)
+	other, otherJSON := event(t, payment.EventPaymentCompleted)
+
+	var otherDone atomic.Bool
+	var stuckCalls atomic.Int32
+	handle := func(ctx context.Context, tx pgx.Tx, ev payment.Event) error {
+		switch ev.EventID {
+		case stuck.EventID:
+			stuckCalls.Add(1)
+			if !otherDone.Load() {
+				return fmt.Errorf("send email: %w", consumer.ErrUnavailable)
+			}
+		case other.EventID:
+			defer otherDone.Store(true)
+		}
+		return consumer.Notifications(ctx, tx, ev)
+	}
+
+	h.produceTo(0, stuckJSON, behindJSON)
+	h.produceTo(1, otherJSON)
+	h.start(handle)
+	h.waitProcessed(other.EventID)
+	h.waitProcessed(behind.EventID)
+
+	if got := stuckCalls.Load(); got <= 3 {
+		t.Errorf("stuck handler called %d times, want more than MaxAttempts (3)", got)
+	}
+	if n := h.count(`SELECT count(*) FROM notifications WHERE event_id = $1`, stuck.EventID); n != 2 {
+		t.Errorf("stuck event produced %d notifications, want 2", n)
+	}
+	if n := h.count(`SELECT count(*) FROM processed_events
+		WHERE event_id = $1 AND processed_at < (SELECT processed_at FROM processed_events WHERE event_id = $2)`,
+		stuck.EventID, behind.EventID); n != 1 {
+		t.Error("record behind the stuck one was processed first")
+	}
+
+	// The partition has resumed, and the first thing dead-lettered is this
+	// poison record, not the stuck event.
+	h.produceTo(0, []byte(`{not json`))
+	dl := readDLQ(t, h.cluster, 1)
+	if len(dl) != 1 || string(dl[0].Value) != `{not json` {
+		t.Fatalf("dead-letter topic = %d records, want only the poison record", len(dl))
 	}
 }
 
