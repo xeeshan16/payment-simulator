@@ -15,6 +15,7 @@ Small, independently shippable tasks, roughly in priority order. Each should lan
 - [x] Expire idempotency keys after 24 hours, and prune expired keys
 - [x] Bound the wait on an in-flight idempotency key with a lock timeout; return `409 Conflict` instead of waiting indefinitely
 - [x] Consumer: pause the partition on infrastructure errors, dead-letter only poison messages
+- [x] DLQ replay tool: re-publish selected dead-lettered records to the main topic
 
 ## Next
 
@@ -23,7 +24,6 @@ Small, independently shippable tasks, roughly in priority order. Each should lan
 
 ### Operability
 - [ ] OpenTelemetry tracing, with trace context propagated through the outbox into Kafka headers and continued in the consumer
-- [ ] DLQ replay tool: re-publish selected dead-lettered records to the main topic
 
 ### Payments domain
 - [ ] Refunds: full and partial, as new journals referencing the original payment; never mutate the original entries

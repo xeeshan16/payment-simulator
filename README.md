@@ -117,6 +117,17 @@ Without `PAYSIM_TEST_DATABASE_URL`, integration tests are skipped rather than fa
 | `PAYSIM_IDEMPOTENCY_KEY_WAIT` | `5s`: how long a payment request waits for a concurrent request with the same key before returning `409`; `0` waits indefinitely |
 | `PAYSIM_OUTBOX_RETENTION` | `168h`: published outbox rows older than this are pruned in batches; `0` keeps them forever |
 
+## Replaying dead-lettered events
+
+Once the cause of a dead-lettered event is fixed, `cmd/dlqreplay` re-publishes it to the main topic. It reads the dead-letter topic up to its current end, selects records by event id (from the `event-id` header, or the payload's `event_id` when the header is missing) or takes them all, and publishes each with its original key, value and headers, minus the `dlq-*` diagnostics and plus a `dlq-replayed-from` header naming the dead-letter record. The key keeps the record on its original partition, and the consumer's `processed_events` dedupe means a replayed event is applied at most once, even if it is replayed twice. Dead-letter records are left in place.
+
+```bash
+go run ./cmd/dlqreplay -all -dry-run                        # list what is in the DLQ, publish nothing
+go run ./cmd/dlqreplay -event-id 0193f6c2-...,0193f6c3-...  # replay selected events
+```
+
+Brokers and topics default to `PAYSIM_KAFKA_BROKERS`, `PAYSIM_TOPIC` and `PAYSIM_DLQ_TOPIC`. The command exits non-zero if any requested event id is not in the dead-letter topic. Replaying a record that cannot be decoded sends it straight back to the DLQ, so select events by id unless the whole topic is known to be fixable.
+
 ## Load testing
 
 `cmd/loadgen` opens a fresh set of synthetic accounts on a running simulator, then sends concurrent `POST /v1/payments` requests (each with a unique `Idempotency-Key`) and reports throughput, p50/p95/p99/max latency and outcomes (`completed`, `rejected`, `http_<status>`, `transport_error`):
@@ -148,9 +159,11 @@ To reproduce, trigger the workflow from the Actions tab (duration and workers ar
 ```
 cmd/paysim            wiring: config, HTTP server, relay, pruners, consumer, graceful shutdown
 cmd/loadgen           HTTP load generator: concurrent transfers, hot-account skew, latency percentiles
+cmd/dlqreplay         re-publish selected dead-lettered records to the main topic
 internal/payment      accounts, transfers, ledger, idempotency and key expiry, outbox writes
 internal/outbox       relay: claim → publish → mark published; pruner for published rows
 internal/consumer     at-least-once consumer with dedupe, retries, partition pause, DLQ
+internal/dlq          dead-letter replay: read the DLQ to its end, select, re-publish
 internal/kafka        franz-go publisher
 internal/httpapi      JSON/HTTP handlers and error mapping
 internal/db           pool + embedded SQL migrations
