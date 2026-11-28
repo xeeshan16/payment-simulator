@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"github.com/xeeshan16/payment-simulator/internal/dlq"
 	"github.com/xeeshan16/payment-simulator/internal/id"
 	"github.com/xeeshan16/payment-simulator/internal/payment"
 )
@@ -295,18 +296,18 @@ func (c *Consumer) applyOnce(ctx context.Context, ev payment.Event) error {
 
 func (c *Consumer) deadLetter(ctx context.Context, rec *kgo.Record, cause error) error {
 	c.log.Error("dead-lettering record", "topic", rec.Topic, "partition", rec.Partition, "offset", rec.Offset, "err", cause)
-	dlq := &kgo.Record{
+	dead := &kgo.Record{
 		Topic: c.cfg.DLQTopic,
 		Key:   rec.Key,
 		Value: rec.Value,
 		Headers: append(append([]kgo.RecordHeader(nil), rec.Headers...),
-			kgo.RecordHeader{Key: "dlq-error", Value: []byte(cause.Error())},
-			kgo.RecordHeader{Key: "dlq-original-topic", Value: []byte(rec.Topic)},
-			kgo.RecordHeader{Key: "dlq-original-partition", Value: []byte(strconv.Itoa(int(rec.Partition)))},
-			kgo.RecordHeader{Key: "dlq-original-offset", Value: []byte(strconv.FormatInt(rec.Offset, 10))},
+			kgo.RecordHeader{Key: dlq.HeaderError, Value: []byte(cause.Error())},
+			kgo.RecordHeader{Key: dlq.HeaderOriginalTopic, Value: []byte(rec.Topic)},
+			kgo.RecordHeader{Key: dlq.HeaderOriginalPartition, Value: []byte(strconv.Itoa(int(rec.Partition)))},
+			kgo.RecordHeader{Key: dlq.HeaderOriginalOffset, Value: []byte(strconv.FormatInt(rec.Offset, 10))},
 		),
 	}
-	if err := c.client.ProduceSync(ctx, dlq).FirstErr(); err != nil {
+	if err := c.client.ProduceSync(ctx, dead).FirstErr(); err != nil {
 		return fmt.Errorf("publish to dead-letter topic: %w (original error: %v)", err, cause)
 	}
 	return nil
